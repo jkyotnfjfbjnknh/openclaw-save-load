@@ -320,8 +320,90 @@ function handleSave(args?: string, ctx?: { channel?: string; from?: string }): {
     return { text: "⚠️ No messages to save since last boundary." };
   }
 
-  // Generate filename
-  const label = args ? escapeLabel(args) : "unnamed";
+  // Parse flags: /save --append <label> or /save --new <label>
+  let rawLabel = args || "unnamed";
+  let appendMode = false;
+  let forceNew = false;
+
+  if (args?.startsWith("--append ")) {
+    appendMode = true;
+    rawLabel = args.slice("--append ".length).trim() || "unnamed";
+  } else if (args?.startsWith("--new ")) {
+    forceNew = true;
+    rawLabel = args.slice("--new ".length).trim() || "unnamed";
+  }
+
+  const label = escapeLabel(rawLabel);
+  const index = loadSaveIndex();
+  const existingEntry = index.find(
+    (e) => (e.label.toLowerCase() === rawLabel.toLowerCase()) || e.filename.includes(`_${label}.`),
+  );
+
+  // If same-name exists and no flag given, ask user
+  if (existingEntry && !appendMode && !forceNew) {
+    const existingPath = path.join(SAVES_DIR, existingEntry.filename);
+    if (fs.existsSync(existingPath)) {
+      const existing = JSON.parse(fs.readFileSync(existingPath, "utf-8"));
+      const existingCount = existing.messageCount || existing.messages?.length || 0;
+      return {
+        text: [
+          `⚠️ 存档 **${rawLabel}** 已存在（${existingCount} 条消息）。`,
+          ``,
+          `请选择：`,
+          `• \`/save --append ${rawLabel}\` — 追加新消息到末尾`,
+          `• \`/save --new ${rawLabel}\` — 创建新的独立存档`,
+        ].join("\n"),
+      };
+    }
+  }
+
+  // Append mode: merge new messages into existing save
+  if (existingEntry && appendMode) {
+    const existingPath = path.join(SAVES_DIR, existingEntry.filename);
+    if (fs.existsSync(existingPath)) {
+      const existing = JSON.parse(fs.readFileSync(existingPath, "utf-8"));
+      const existingMessages: TranscriptMessage[] = existing.messages || [];
+
+      // Deduplicate: only add messages not already in the save (by content)
+      const existingContents = new Set(existingMessages.map((m) => m.content));
+      const newMessages = messages.filter((m) => !existingContents.has(m.content));
+
+      if (newMessages.length === 0) {
+        return { text: `ℹ️ 没有新消息可以追加到 **${rawLabel}**。` };
+      }
+
+      const mergedMessages = [...existingMessages, ...newMessages];
+      existing.messages = mergedMessages;
+      existing.messageCount = mergedMessages.length;
+      existing.savedAt = new Date().toISOString();
+
+      fs.writeFileSync(existingPath, JSON.stringify(existing, null, 2), "utf-8");
+
+      // Update index
+      updateSaveIndex({
+        filename: existingEntry.filename,
+        label: rawLabel,
+        savedAt: existing.savedAt,
+        messageCount: mergedMessages.length,
+      });
+
+      // Update boundary
+      const now = new Date().toISOString();
+      saveBoundaryState(now, `save:${existingEntry.filename}`);
+
+      return {
+        text: [
+          `✅ 已追加 ${newMessages.length} 条新消息到 **${rawLabel}**`,
+          `📁 ${existingEntry.filename}`,
+          `📊 总计：${mergedMessages.length} 条消息`,
+          ``,
+          `使用 /load ${label} 恢复上下文。`,
+        ].join("\n"),
+      };
+    }
+  }
+
+  // New save mode
   const ts = timestamp();
   const filename = `${ts}_${label}.json`;
   const filePath = path.join(SAVES_DIR, filename);
