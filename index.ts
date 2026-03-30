@@ -12,9 +12,15 @@ let _runtime: PluginRuntime | null = null;
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const SAVES_DIR = path.join(os.homedir(), ".openclaw", "saves");
-const SESSIONS_DIR = path.join(os.homedir(), ".openclaw", "agents", "main", "sessions");
-const SESSIONS_STORE = path.join(SESSIONS_DIR, "sessions.json");
 const BOUNDARY_STATE_FILE = path.join(SAVES_DIR, ".boundary-state.json");
+
+function sessionsDir(agentName: string = "main"): string {
+  return path.join(os.homedir(), ".openclaw", "agents", agentName, "sessions");
+}
+
+function sessionsStorePath(agentName: string = "main"): string {
+  return path.join(sessionsDir(agentName), "sessions.json");
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -45,12 +51,13 @@ type SessionEntry = {
 };
 
 function loadSessionStore(): Record<string, SessionEntry> {
-  if (!fs.existsSync(SESSIONS_STORE)) return {};
-  return JSON.parse(fs.readFileSync(SESSIONS_STORE, "utf-8"));
+  const storePath = sessionsStorePath();
+  if (!fs.existsSync(storePath)) return {};
+  return JSON.parse(fs.readFileSync(storePath, "utf-8"));
 }
 
 function saveSessionStore(store: Record<string, SessionEntry>) {
-  fs.writeFileSync(SESSIONS_STORE, JSON.stringify(store, null, 2), "utf-8");
+  fs.writeFileSync(sessionsStorePath(), JSON.stringify(store, null, 2), "utf-8");
 }
 
 /**
@@ -88,7 +95,7 @@ function resolveTranscriptPath(sessionId: string, sessionFile?: string): string 
   if (sessionFile && fs.existsSync(sessionFile)) {
     return sessionFile;
   }
-  return path.join(SESSIONS_DIR, `${sessionId}.jsonl`);
+  return path.join(sessionsDir(), `${sessionId}.jsonl`);
 }
 
 // ─── Transcript Parsing ──────────────────────────────────────────────────────
@@ -232,10 +239,10 @@ function generateSessionId(): string {
 }
 
 function archiveTranscript(sessionId: string) {
-  const transcriptPath = path.join(SESSIONS_DIR, `${sessionId}.jsonl`);
+  const transcriptPath = path.join(sessionsDir(), `${sessionId}.jsonl`);
   if (!fs.existsSync(transcriptPath)) return;
   const archiveName = `${sessionId}.reset.${Date.now()}.jsonl`;
-  const archivePath = path.join(SESSIONS_DIR, archiveName);
+  const archivePath = path.join(sessionsDir(), archiveName);
   fs.renameSync(transcriptPath, archivePath);
 }
 
@@ -255,23 +262,24 @@ function buildTranscript(sessionId: string, messages: TranscriptMessage[]): stri
     cwd: process.cwd(),
   });
 
-  let parentId = sessionId;
+  let prevMsgId: string | null = null;
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const msgId = crypto.randomBytes(4).toString("hex");
-    parentId = msgId;
 
     lines.push({
       type: "message",
       id: msgId,
-      parentId: i === 0 ? null : crypto.randomBytes(4).toString("hex"),
+      parentId: prevMsgId,
       timestamp: new Date(Date.now() + i).toISOString(),
       message: {
         role: msg.role,
         content: [{ type: "text", text: msg.content }],
       },
     });
+
+    prevMsgId = msgId;
   }
 
   return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
@@ -283,7 +291,10 @@ function handleSave(args?: string, ctx?: { channel?: string; from?: string }): {
   ensureDir(SAVES_DIR);
 
   // Resolve current session
-  const sessionKey = resolveSessionKey(ctx?.channel || "telegram", ctx?.from);
+  if (!ctx?.channel) {
+    return { text: "⚠️ Could not determine channel context." };
+  }
+  const sessionKey = resolveSessionKey(ctx.channel, ctx.from);
   if (!sessionKey) {
     return { text: "⚠️ Could not resolve current session." };
   }
@@ -359,7 +370,7 @@ function handleList(): { text: string } {
 
   const lines = ["📚 **Saved Contexts**\n"];
   index.forEach((entry, i) => {
-    const date = new Date(entry.savedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+    const date = new Date(entry.savedAt).toLocaleString();
     lines.push(`${i + 1}. **${entry.label}** — ${entry.messageCount} msgs, ${date}`);
     lines.push(`   File: \`${entry.filename}\``);
   });
@@ -412,11 +423,17 @@ function handleLoad(args?: string, ctx?: { channel?: string; from?: string }): {
   }
 
   // Read save data
-  const saveData = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-  const messages: TranscriptMessage[] = saveData.messages;
+  const saveData = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<string, unknown>;
+  if (!Array.isArray(saveData.messages)) {
+    return { text: `⚠️ Save file is malformed or incompatible: ${targetEntry.filename}` };
+  }
+  const messages: TranscriptMessage[] = saveData.messages as TranscriptMessage[];
 
   // Resolve current session
-  const sessionKey = resolveSessionKey(ctx?.channel || "telegram", ctx?.from);
+  if (!ctx?.channel) {
+    return { text: "⚠️ Could not determine channel context." };
+  }
+  const sessionKey = resolveSessionKey(ctx.channel, ctx.from);
   if (!sessionKey) {
     return { text: "⚠️ Could not resolve current session." };
   }
@@ -432,7 +449,7 @@ function handleLoad(args?: string, ctx?: { channel?: string; from?: string }): {
 
   // Create new session with loaded messages
   const newSessionId = generateSessionId();
-  const newTranscriptPath = path.join(SESSIONS_DIR, `${newSessionId}.jsonl`);
+  const newTranscriptPath = path.join(sessionsDir(), `${newSessionId}.jsonl`);
   const transcriptContent = buildTranscript(newSessionId, messages);
   fs.writeFileSync(newTranscriptPath, transcriptContent, "utf-8");
 
